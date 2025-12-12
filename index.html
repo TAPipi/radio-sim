@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Radio Check Training</title>
+<style>
+body {
+  font-family: Arial, sans-serif;
+  max-width: 600px;
+  margin: 2rem auto;
+  padding: 1rem;
+  background: #f0f0f0;
+}
+h1 {
+  color: #333;
+}
+.pattern {
+  background: #fff;
+  padding: 1rem;
+  border-radius: 8px;
+  margin: 1rem 0;
+  border-left: 4px solid #0066cc;
+}
+.controls {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+button {
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: bold;
+}
+#btnStart {
+  background: #28a745;
+  color: white;
+}
+#btnStart:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+#btnStop {
+  background: #dc3545;
+  color: white;
+}
+#btnStop:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+#btnRetry {
+  background: #ffc107;
+  color: #333;
+}
+#status {
+  background: #fff;
+  padding: 1rem;
+  border-radius: 8px;
+  margin: 1rem 0;
+}
+#status.ok {
+  border-left: 4px solid #28a745;
+  background: #d4edda;
+}
+#status.bad {
+  border-left: 4px solid #dc3545;
+  background: #f8d7da;
+}
+.label {
+  font-weight: bold;
+  color: #666;
+}
+audio {
+  display: none;
+}
+</style>
+</head>
+<body>
+
+<h1>Radio Check Training</h1>
+
+<div class="pattern">
+  <strong>Target pattern:</strong><br>
+  Maritime Radio, this is [Vessel Name], radio check, over.
+</div>
+
+<div class="controls">
+  <button id="btnStart">Start listening</button>
+  <button id="btnStop" disabled>Stop</button>
+  <button id="btnRetry">Try again</button>
+</div>
+
+<div id="status">
+  <div><span class="label">Status:</span> <span id="state">Idle</span></div>
+  <div><span class="label">Heard:</span> <span id="heard">(nothing yet)</span></div>
+  <div><span class="label">Match:</span> <span id="match">(waiting)</span></div>
+</div>
+
+<audio id="successAudio" src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="></audio>
+
+<script>
+/* global SpeechRecognition, webkitSpeechRecognition */
+
+const btnStart = document.getElementById("btnStart");
+const btnStop = document.getElementById("btnStop");
+const btnRetry = document.getElementById("btnRetry");
+const stateEl = document.getElementById("state");
+const heardEl = document.getElementById("heard");
+const matchEl = document.getElementById("match");
+const statusBox = document.getElementById("status");
+const successAudio = document.getElementById("successAudio");
+
+function setState(text) {
+  stateEl.textContent = text;
+  console.log("State:", text);
+}
+
+function setHeard(text) {
+  heardEl.textContent = text || "(nothing yet)";
+  console.log("Heard:", text);
+}
+
+function setMatch(text, ok) {
+  matchEl.textContent = text;
+  statusBox.classList.remove("ok", "bad");
+  statusBox.classList.add(ok ? "ok" : "bad");
+  console.log("Match:", text, ok ? "✓" : "✗");
+}
+
+function normalise(str) {
+  return (str || "")
+    .toLowerCase()
+    .replace(/['']/g, "'")
+    .replace(/[^a-z0-9\s']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function matchesRadioCheck(recognised) {
+  const t = normalise(recognised);
+  console.log("Normalized text:", t);
+  const re = /^maritime radio this is (.+?) radio check over$/i;
+  const m = t.match(re);
+  if (!m) return { ok: false };
+  const vessel = (m[1] || "").trim();
+  if (vessel.length < 2) return { ok: false };
+  return { ok: true, vessel };
+}
+
+function postToStoryline(type, payload = {}) {
+  console.log("Posting to Storyline:", type, payload);
+  window.parent.postMessage({ type, ...payload }, "*");
+}
+
+let recognition = null;
+let isListening = false;
+let shouldRestart = false;
+
+function initRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = "en-NZ";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  recognition.onstart = () => {
+    console.log("Recognition started");
+    isListening = true;
+    shouldRestart = false;
+    setState("Listening…");
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+  };
+
+  recognition.onend = () => {
+    console.log("Recognition ended, shouldRestart:", shouldRestart);
+    isListening = false;
+    if (shouldRestart && !btnStop.disabled) {
+      setTimeout(() => {
+        if (shouldRestart) {
+          try {
+            console.log("Restarting recognition...");
+            recognition.start();
+          } catch (e) {
+            console.error("Restart failed:", e);
+            btnStart.disabled = false;
+            btnStop.disabled = true;
+            setState("Idle");
+          }
+        }
+      }, 100);
+    } else {
+      btnStop.disabled = true;
+      btnStart.disabled = false;
+      if (stateEl.textContent === "Listening…" || stateEl.textContent === "Starting…") {
+        setState("Idle");
+      }
+    }
+  };
+
+  recognition.onresult = (event) => {
+    console.log("Recognition result event:", event);
+    let finalText = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) finalText += event.results[i][0].transcript;
+    }
+    
+    if (finalText) {
+      setHeard(finalText);
+      
+      const decision = matchesRadioCheck(finalText);
+      if (decision.ok) {
+        shouldRestart = false;
+        recognition.stop();
+        setMatch(`Pass (vessel: ${decision.vessel})`, true);
+        try {
+          successAudio.play();
+        } catch (e) {
+          console.error("Audio play failed:", e);
+        }
+        postToStoryline("PHRASE_PASS", { heard: finalText, vessel: decision.vessel });
+      } else {
+        shouldRestart = false;
+        recognition.stop();
+        setMatch("Not quite. Try again.", false);
+        postToStoryline("PHRASE_FAIL", { heard: finalText });
+      }
+    }
+  };
+  
+  recognition.onerror = (event) => {
+    console.error("Recognition error:", event.error);
+    shouldRestart = false;
+    if (event.error === 'no-speech') {
+      shouldRestart = true;
+    } else {
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      setState("Error: " + event.error);
+    }
+  };
+}
+
+function startListening() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    setState("Error: Browser doesn't support speech recognition");
+    alert("Speech recognition not supported. Use Chrome, Edge, or Safari on HTTPS.");
+    return;
+  }
+
+function sendToStoryline(completed) {
+    // Try to set variable if embedded in iframe
+    if (window.parent) {
+        const player = window.parent.GetPlayer();
+        if (player) {
+            player.SetVar('RadioCheckComplete', completed);
+            console.log('Sent to Storyline: RadioCheckComplete =', completed);
+        }
+    }
+    
+    // Also send postMessage for popup window scenario
+    if (window.opener) {
+        window.opener.postMessage({radioCheckComplete: completed}, '*');
+    } else if (window.parent && window.parent !== window) {
+        window.parent.postMessage({radioCheckComplete: completed}, '*');
+    }
+
+window.addEventListener("message", (event) => {
+  if (!event.data || !event.data.type) return;
+
+  switch (event.data.type) {
+    case "PTT_START":
+      startListening();
+      break;
+
+    case "PTT_STOP":
+      shouldRestart = false;
+      if (recognition) recognition.stop();
+      break;
+  }
+});
+
+  if (!recognition) initRecognition();
+  if (isListening) {
+    console.log("Already listening, ignoring click");
+    return;
+  }
+
+  setState("Starting…");
+  setHeard("");
+  matchEl.textContent = "(listening)";
+  btnStart.disabled = true;
+  btnStop.disabled = false;
+  shouldRestart = true;
+
+  try {
+    console.log("Calling recognition.start()...");
+    recognition.start();
+  } catch (e) {
+    console.error("Start error:", e);
+    setState("Error: " + e.message);
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    shouldRestart = false;
+  }
+}
+
+btnStart.addEventListener("click", startListening);
+btnStop.addEventListener("click", () => {
+  console.log("Stop clicked");
+  shouldRestart = false;
+  if (recognition) recognition.stop();
+});
+btnRetry.addEventListener("click", () => {
+  console.log("Retry clicked");
+  shouldRestart = false;
+  setState("Idle");
+  setHeard("");
+  matchEl.textContent = "(waiting)";
+  btnStart.disabled = false;
+  btnStop.disabled = true;
+});
+
+console.log("Radio Check script loaded");
+console.log("Speech Recognition available:", !!(window.SpeechRecognition || window.webkitSpeechRecognition));
+</script>
+
+</body>
+</html>
